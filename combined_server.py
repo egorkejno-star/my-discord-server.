@@ -1,39 +1,60 @@
 import asyncio
 import os
-import websockets
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import uvicorn
 
-# Render автоматически выдает порт в переменную среды PORT
-PORT = int(os.environ.get("PORT", 55555))
+app = FastAPI()
 
-# Храним подключенных клиентов: {websocket: nickname}
+# Храним активные подключения: {websocket: nickname}
 CLIENTS = {}
 
-# Обработчик обычных HTTP/HEAD запросов для проверок Render
-async def health_check(path, request_headers):
-    if path == "/":
-        return websockets.http.HTTPStatus.OK, [], b"OK"
+# Этот роут будет автоматически отвечать на пинги Render (200 OK)
+@app.get("/")
+async def health_check():
+    return {"status": "working"}
+
+@app.head("/")
+async def health_check_head():
     return None
 
 async def broadcast(message, exclude_ws=None):
     if CLIENTS:
-        targets = [ws for ws in CLIENTS if ws != exclude_ws]
-        if targets:
-            await asyncio.gather(*[ws.send(message) for ws in targets], return_exceptions=True)
+        for ws in list(CLIENTS.keys()):
+            if ws != exclude_ws:
+                try:
+                    if isinstance(message, str):
+                        await ws.send_text(message)
+                    else:
+                        await ws.send_bytes(message)
+                except Exception:
+                    # Если клиент отвалился во время отправки
+                    if ws in CLIENTS:
+                        del CLIENTS[ws]
 
-async def handle_client(websocket):
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    
+    # Первое сообщение от клиента — никнейм
     try:
-        nickname = await websocket.recv()
+        nickname = await websocket.receive_text()
         CLIENTS[websocket] = nickname
         print(f"[Сервер]: @{nickname} подключился.")
         await broadcast(f"[Сервер]: @{nickname} ворвался в чат!", exclude_ws=websocket)
     except Exception as e:
-        print(f"Ошибка при авторизации: {e}")
+        print(f"Ошибка авторизации: {e}")
+        await websocket.close()
         return
 
+    # Цикл приёма сообщений
     try:
-        async for message in websocket:
-            await broadcast(message, exclude_ws=websocket)
-    except websockets.exceptions.ConnectionClosed:
+        while True:
+            data = await websocket.receive()
+            if "text" in data:
+                await broadcast(data["text"], exclude_ws=websocket)
+            elif "bytes" in data:
+                await broadcast(data["bytes"], exclude_ws=websocket)
+    except WebSocketDisconnect:
         pass
     finally:
         if websocket in CLIENTS:
@@ -42,14 +63,6 @@ async def handle_client(websocket):
             print(f"[Сервер]: @{nick} отключился.")
             await broadcast(f"[Сервер]: @{nick} покинул чат!")
 
-async def main():
-    print(f"Сервер WebSocket запускается на порту {PORT}...")
-    # Привязываем health_check к серверу
-    async with websockets.serve(handle_client, "0.0.0.0", PORT, process_request=health_check):
-        await asyncio.Future() # Держим сервер запущенным
-
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Сервер остановлен.")
+    PORT = int(os.environ.get("PORT", 55555))
+    uvicorn.run("combined_server:app", host="0.0.0.0", port=PORT, log_level="info")
