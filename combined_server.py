@@ -8,15 +8,19 @@ PORT = int(os.environ.get("PORT", 55555))
 # Храним подключенных клиентов: {websocket: nickname}
 CLIENTS = {}
 
+# Обработчик обычных HTTP/HEAD запросов для проверок Render
+async def health_check(path, request_headers):
+    if path == "/":
+        return websockets.http.HTTPStatus.OK, [], b"OK"
+    return None
+
 async def broadcast(message, exclude_ws=None):
     if CLIENTS:
-        # Создаем список задач на отправку всем, кроме автора сообщения
         targets = [ws for ws in CLIENTS if ws != exclude_ws]
         if targets:
             await asyncio.gather(*[ws.send(message) for ws in targets], return_exceptions=True)
 
 async def handle_client(websocket):
-    # Ожидаем первое сообщение — никнейм
     try:
         nickname = await websocket.recv()
         CLIENTS[websocket] = nickname
@@ -26,10 +30,8 @@ async def handle_client(websocket):
         print(f"Ошибка при авторизации: {e}")
         return
 
-    # Цикл обработки сообщений (и текст, и голос летят через один канал)
     try:
         async for message in websocket:
-            # Если это строка (текст), пересылаем как текст, если байты (голос) — как байты
             await broadcast(message, exclude_ws=websocket)
     except websockets.exceptions.ConnectionClosed:
         pass
@@ -42,7 +44,8 @@ async def handle_client(websocket):
 
 async def main():
     print(f"Сервер WebSocket запускается на порту {PORT}...")
-    async with websockets.serve(handle_client, "0.0.0.0", PORT):
+    # Привязываем health_check к серверу
+    async with websockets.serve(handle_client, "0.0.0.0", PORT, process_request=health_check):
         await asyncio.Future() # Держим сервер запущенным
 
 if __name__ == "__main__":
