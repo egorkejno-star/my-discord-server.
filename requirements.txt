@@ -1,1 +1,16 @@
-websockets==12.0
+import asyncio
+import os
+import websockets
+
+# Render автоматически выдает порт в переменную среды PORT
+PORT = int(os.environ.get("PORT", 55555))
+
+# Храним подключенных клиентов: {websocket: nickname}
+CLIENTS = {}
+
+# Обработчик обычных HTTP/HEAD запросов для проверок Render
+async def health_check(path, request_headers):
+    # Если Render пингует сервер, возвращаем ему статус 200 OK
+    if path == "/":
+        return websockets.http.HTTPStatus.OK, [], b"OK"
+    return None
